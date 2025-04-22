@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>AI Interview Evaluator</title>
+
+<!-- pdf.js -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js"></script>
+<script>
+  pdfjsLib.GlobalWorkerOptions.workerSrc =
+    "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.worker.min.js";
+</script>
+
+<!-- compromise (light‑weight NLP helpers) -->
+<script src="https://cdn.jsdelivr.net/npm/compromise@13.2.0/builds/compromise.browser.min.js"></script>
+
+<style>
+  body {font-family: Arial, sans-serif; text-align:center; margin:40px;background:#f6f6f8;}
+  label,input,button {margin:10px;font-size:16px}
+  button{padding:10px 18px;cursor:pointer;background:#4caf50;border:none;color:#fff}
+  h2{margin-top:30px}
+  .question-container{display:inline-block;text-align:left;width:60%;max-width:800px;
+    background:#fff;border:1px solid #ddd;padding:12px;margin:12px 0}
+  textarea{width:100%;height:70px;margin-top:8px;font-size:14px}
+  .feedback{white-space:pre-wrap;background:#e8ffe8;border:1px solid #2e9e2e;
+    padding:8px;border-radius:4px;margin-top:8px;font-weight:600;color:#206020}
+  .header{font-weight:700;text-decoration:underline;margin:14px 0}
+</style>
+</head>
+<body>
+<h1>Resume & JD AI Interview Evaluator</h1>
+
+<label>Resume (PDF):</label>
+<input type="file" id="resumeFile" accept="application/pdf" />
+<label>Job Description (PDF/TXT):</label>
+<input type="file" id="jdFile" accept="application/pdf,text/plain" />
+<br />
+<button id="uploadBtn">Upload & Generate Questions</button>
+
+<h2>Generated Questions</h2>
+<div id="questionsContainer">Upload a resume and JD to generate questions…</div>
+<button id="evaluateBtn">Evaluate Answers</button>
+
+<script>
+/* ---------- Heuristic helpers ---------- */
+const fillerWords = ["um","uh","like","you know","basically","actually","literally","so"];
+function countFiller(text){
+  const lc=text.toLowerCase();
+  return fillerWords.reduce((c,w)=>c+(lc.match(new RegExp("\\b"+w+"\\b","g"))||[]).length,0);
+}
+function avgSentenceLength(text){
+  const s=text.split(/[.!?]\s/).filter(t=>t.trim().length);
+  const w=text.split(/\s+/).length||1;
+  return (w/s.length).toFixed(1);
+}
+function repetition(text){
+  const words=text.toLowerCase().split(/\s+/);
+  const seen={}, reps=new Set();
+  words.forEach(w=>{seen[w]?reps.add(w):seen[w]=1});
+  return Array.from(reps).slice(0,5); // first 5 repeats
+}
+/* ---------- File text extraction ---------- */
+async function extractText(file){
+  return new Promise((res,rej)=>{
+    const reader=new FileReader();
+    reader.onload=async e=>{
+      try{
+        if(file.type==="application/pdf"){
+          const pdf=await pdfjsLib.getDocument({data:new Uint8Array(e.target.result)}).promise;
+          let t="";
+          for(let p=1;p<=pdf.numPages;p++){
+            const page=await pdf.getPage(p);
+            const txt=await page.getTextContent();
+            t+=txt.items.map(i=>i.str).join(" ")+" ";
+          }
+          res(t.slice(0,3000));
+        }else res(e.target.result.slice(0,3000));
+      }catch(err){rej(err);}
+    };
+    file.type==="application/pdf"?reader.readAsArrayBuffer(file):reader.readAsText(file);
+  });
+}
+/* ---------- Proxy call ---------- */
+async function callLLM(prompt){
+  console.log("%c[LLM PROMPT]","color:blue",prompt);
+  const r=await fetch("http://localhost:3000/api/generateContent",{
+    method:"POST",
+    headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({prompt})
+  });
+  const data=await r.json();
+  console.log("%c[LLM RESPONSE]","color:green",data);
+  return data.candidates?.[0]?.content?.parts?.[0]?.text||"";
+}
+/* ---------- UI actions ---------- */
+document.getElementById("uploadBtn").onclick=async ()=>{
+  const resF=document.getElementById("resumeFile").files[0];
+  const jdF =document.getElementById("jdFile").files[0];
+  if(!resF||!jdF){alert("Upload both files");return;}
+  document.getElementById("questionsContainer").innerText="Extracting text…";
+  try{
+    const resText=await extractText(resF);
+    const jdText =await extractText(jdF);
+    console.log("[Extracted Resume]",resText.slice(0,150));
+    console.log("[Extracted JD]",jdText.slice(0,150));
+    document.getElementById("questionsContainer").innerText="Generating questions…";
+    const qPrompt=`Analyze the resume and job description below and generate 6–8 interview questions.
+Resume:
+${resText}
+
+Job Description:
+${jdText}
+
+Return the questions grouped under:
+### Technical Questions
+### Behavioral Questions
+### Situational Questions`;
+    const qRaw = await callLLM(qPrompt);
+    const qLines=qRaw.split("\n").filter(l=>l.trim());
+    displayQuestions(qLines);
+  }catch(e){
+    console.error(e);
+    document.getElementById("questionsContainer").innerText="Error processing files (see console)";
+  }
+};
+function displayQuestions(lines){
+  const C=document.getElementById("questionsContainer");
+  C.innerHTML="";
+  let idx=1;
+  lines.forEach(l=>{
+    const div=document.createElement("div");
+    if(l.startsWith("###")){
+      div.className="header";
+      div.textContent=l.replace(/^###\s*/,"");
+    }else{
+      div.className="question-container";
+      div.innerHTML=`<p><strong>Q${idx}:</strong> ${l}</p>
+        <textarea id="answer${idx}"></textarea>
+        <p class="feedback" id="fb${idx}"></p>`;
+      idx++;
+    }
+    C.appendChild(div);
+  });
+}
+document.getElementById("evaluateBtn").onclick=async ()=>{
+  const qDivs=document.querySelectorAll(".question-container");
+  for(let i=1;i<=qDivs.length;i++){
+    const ans=document.getElementById(`answer${i}`).value.trim();
+    if(!ans)continue;
+    const q=qDivs[i-1].querySelector("p").innerText;
+    /* local heuristics */
+    const heur=`FillerWords:${countFiller(ans)} | AvgSentLen:${avgSentenceLength(ans)} | Repeats:${repetition(ans).join(",")}`;
+    /* build evaluation prompt */
+    const evalPrompt=`You are an AI interview grader.
+Question: ${q}
+Answer: ${ans}
+
+Heuristics: ${heur}
+
+Evaluate on:
+1. STAR completeness
+2. Bloom’s level (0–5)
+3. Communication clarity (CEFR scale)
+4. Domain relevance
+
+Return a short feedback paragraph.`;
+    document.getElementById(`fb${i}`).innerText="Evaluating…";
+    try{
+      const fb=await callLLM(evalPrompt);
+      document.getElementById(`fb${i}`).innerText=fb||"No feedback";
+    }catch(e){
+      console.error(e);
+      document.getElementById(`fb${i}`).innerText="LLM error (see console)";
+    }
+  }
+};
+</script>
+</body>
+</html>
