@@ -1,12 +1,13 @@
 require('dotenv').config();
 const express = require('express');
-const axios   = require('axios');
-const cors    = require('cors');          // ← new
-const app     = express();
-const PORT    = 3000;
+const axios = require('axios');
+const cors = require('cors');
+
+const app = express();
+const PORT = 3000;
 const API_KEY = process.env.API_KEY;
 
-app.use(cors());                          // ← allow all origins (or pass options)
+app.use(cors());
 app.use(express.json());
 
 app.post('/api/generateContent', async (req, res) => {
@@ -27,5 +28,5 @@ app.post('/api/generateContent', async (req, res) => {
 });
 
 app.listen(PORT, () =>
-  console.log(`🔐 Gemini proxy listening on http://localhost:${PORT}`)
+  console.log(`🔐 Gemini proxy running at http://localhost:${PORT}`)
 );
