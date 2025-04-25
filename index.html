@@ -16,6 +16,7 @@
     label,input,button{margin:8px;font-size:15px}
     input[type=number]{width:60px;text-align:center}
     button{padding:9px 18px;border:none;background:#4caf50;color:#fff;cursor:pointer}
+    button:disabled{background:#cccccc;cursor:not-allowed}
     h2{margin-top:32px}
     .question-container{display:inline-block;width:60%;max-width:820px;
         background:#fff;border:1px solid #ddd;padding:12px;margin:14px auto;text-align:left}
@@ -24,6 +25,26 @@
         padding:8px;margin-top:8px;border-radius:4px;font-weight:600}
     .header{font-weight:700;text-decoration:underline;margin:16px 0}
     .mic-btn{background:#2196f3;border:none;color:white;padding:6px 12px;margin-left:4px;cursor:pointer}
+    .recording{background:#f44336;animation:pulse 1.5s infinite}
+    .speech-controls{display:flex;align-items:center;margin-top:6px;justify-content:flex-start;gap:8px}
+    .timer{font-weight:bold;margin-left:10px;font-family:monospace;font-size:16px}
+    .interview-timer{font-size:24px;font-weight:bold;color:#e91e63;margin:20px 0;font-family:monospace}
+    .time-input-container{background:#fff;padding:12px;border:1px solid #ddd;display:inline-block;margin:16px 0}
+    #stopInterviewBtn{background:#f44336}
+    .timer-controls{display:flex;justify-content:center;align-items:center;gap:10px;margin-top:10px}
+    
+    @keyframes pulse {
+      0% {background-color:#f44336}
+      50% {background-color:#ff7043}
+      100% {background-color:#f44336}
+    }
+
+    .blink {
+      animation: blink-animation 1s steps(5, start) infinite;
+    }
+    @keyframes blink-animation {
+      to { visibility: hidden; }
+    }
   </style>
 </head>
 <body>
@@ -38,10 +59,22 @@
 <label>Behavioral:</label><input type="number" id="behQty" value="3"  min="0" max="10">
 <label>Situational:</label><input type="number" id="sitQty" value="2" min="0" max="10"><br>
 
-<button id="uploadBtn">Upload & Generate Questions</button>
+<!-- Generate questions button -->
+<button id="generateBtn">Generate Questions</button>
+
+<!-- New: Time limit input -->
+<div class="time-input-container">
+  <label>Interview Time Limit (minutes):</label>
+  <input type="number" id="interviewTimeLimit" value="10" min="1" max="60">
+  <div id="interviewTimerDisplay" class="interview-timer">Time: 00:00</div>
+  <div class="timer-controls">
+    <button id="resetTimerBtn">Reset Timer</button>
+    <button id="stopInterviewBtn" disabled>Stop Interview</button>
+  </div>
+</div>
 
 <h2>Generated Questions</h2>
-<div id="questionsContainer">Upload files then click “Generate Questions”.</div>
+<div id="questionsContainer">Upload files then click "Generate Questions".</div>
 <button id="evaluateBtn">Evaluate Answers</button>
 
 <script>
@@ -51,8 +84,151 @@ function countFiller(t){const lc=t.toLowerCase();return fillerWords.reduce((c,w)
 function avgSentenceLen(t){const s=t.split(/[.!?]\s/).filter(x=>x.trim().length);const w=t.split(/\s+/).length||1;return (w/s.length).toFixed(1);}
 function repetition(t){const w=t.toLowerCase().split(/\s+/);const seen={},dups=new Set();w.forEach(x=>{seen[x]?dups.add(x):seen[x]=1});return Array.from(dups).slice(0,5);}
 
+/* ---------- Speech Recognition Variables ---------- */
+window.recognition = new (window.SpeechRecognition || window.webkitSpeechRecognition)();
+recognition.continuous = true;
+recognition.interimResults = true;
+recognition.lang = "en-US";
+let isRecording = false;
+let currentTextarea = null;
+let timerInterval = null;
+let recordingTime = 0;
+
+// Interview Timer Variables
+let interviewTimerInterval = null;
+let interviewTimeRemaining = 0;
+let interviewOngoing = false;
+
+/* ---------- Speech Recognition Event Handlers ---------- */
+recognition.onresult = (event) => {
+  if (!currentTextarea) return;
+  
+  let interimTranscript = '';
+  let finalTranscript = '';
+  
+  for (let i = event.resultIndex; i < event.results.length; i++) {
+    const transcript = event.results[i][0].transcript;
+    if (event.results[i].isFinal) {
+      finalTranscript += transcript + ' ';
+    } else {
+      interimTranscript += transcript;
+    }
+  }
+  
+  // Update textarea with final + interim results
+  const currentContent = currentTextarea.value || '';
+  const contentWithoutInterim = currentContent.replace(/\(recording\.\.\.\).*$/, '').trim();
+  
+  currentTextarea.value = contentWithoutInterim;
+  if (finalTranscript) {
+    if (currentTextarea.value) currentTextarea.value += ' ';
+    currentTextarea.value += finalTranscript;
+  }
+  
+  // Show interim results
+  if (interimTranscript) {
+    currentTextarea.value += ` (recording...) ${interimTranscript}`;
+  }
+};
+
+recognition.onend = () => {
+  // Only restart if we're still in recording mode
+  if (isRecording) {
+    recognition.start();
+  }
+};
+
+recognition.onerror = (event) => {
+  console.error('Speech recognition error:', event.error);
+  stopRecording();
+};
+
+/* ---------- Recording Control Functions ---------- */
+function startRecording(textareaId) {
+  if (!interviewOngoing) {
+    alert("Please generate questions to start the interview!");
+    return;
+  }
+  
+  // Stop any existing recording session
+  if (isRecording) {
+    stopRecording();
+  }
+  
+  currentTextarea = document.getElementById(textareaId);
+  if (!currentTextarea) return;
+  
+  // Start recognition
+  try {
+    isRecording = true;
+    recognition.start();
+    
+    // Find this question's controls and update UI
+    const container = currentTextarea.closest('.question-container');
+    if (container) {
+      const startBtn = container.querySelector('.start-rec');
+      const stopBtn = container.querySelector('.stop-rec');
+      const timerEl = container.querySelector('.timer');
+      
+      if (startBtn) startBtn.classList.add('recording');
+      if (stopBtn) stopBtn.classList.add('recording');
+      
+      // Start timer
+      recordingTime = 0;
+      updateTimerDisplay(timerEl);
+      timerInterval = setInterval(() => {
+        recordingTime++;
+        updateTimerDisplay(timerEl);
+      }, 1000);
+    }
+  } catch (error) {
+    console.error('Failed to start recording:', error);
+  }
+}
+
+function stopRecording() {
+  if (!isRecording) return;
+  
+  // Stop recognition and timer
+  try {
+    recognition.stop();
+  } catch (error) {
+    console.error('Error stopping recognition:', error);
+  }
+  
+  isRecording = false;
+  clearInterval(timerInterval);
+  
+  // Clean up interim text if any
+  if (currentTextarea) {
+    currentTextarea.value = currentTextarea.value.replace(/\(recording\.\.\.\).*$/, '').trim();
+  }
+  
+  // Reset UI
+  const containers = document.querySelectorAll('.question-container');
+  containers.forEach(container => {
+    const startBtn = container.querySelector('.start-rec');
+    const stopBtn = container.querySelector('.stop-rec');
+    
+    if (startBtn) startBtn.classList.remove('recording');
+    if (stopBtn) stopBtn.classList.remove('recording');
+  });
+  
+  currentTextarea = null;
+}
+
+function updateTimerDisplay(timerEl) {
+  if (!timerEl) return;
+  
+  const minutes = Math.floor(recordingTime / 60);
+  const seconds = recordingTime % 60;
+  timerEl.textContent = `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+}
+
 /* ---------- File extract ---------- */
 async function extractText(file){
+  if (!file) return ""; // Handle case where file is missing
+  
   return new Promise((res,rej)=>{
     const r=new FileReader();
     r.onload=async e=>{
@@ -84,22 +260,33 @@ async function callProxy(prompt){
 }
 
 /* ---------- Question Generation ---------- */
-document.getElementById("uploadBtn").onclick=async()=>{
+document.getElementById("generateBtn").onclick=async()=>{
   const resF=document.getElementById("resumeFile").files[0];
   const jdF =document.getElementById("jdFile").files[0];
-  if(!resF||!jdF){alert("Upload both files");return;}
+  
+  // Check if at least resume is available
+  if(!resF){
+    alert("Resume is required");
+    return;
+  }
+  
   const techCnt=+document.getElementById("techQty").value||0;
   const behCnt =+document.getElementById("behQty").value||0;
   const sitCnt =+document.getElementById("sitQty").value||0;
 
   const qc=document.getElementById("questionsContainer");
   qc.innerText="Extracting text…";
+  
   try{
     const resTxt=await extractText(resF);
-    const jdTxt =await extractText(jdF);
+    const jdTxt = jdF ? await extractText(jdF) : ""; // Only extract JD if available
 
     qc.innerText="Generating questions…";
-    const prompt=`Generate interview questions for the resume and JD below.
+    
+    let prompt;
+    if (jdTxt) {
+      // If both resume and JD are available
+      prompt=`Generate interview questions for the resume and JD below.
 Return exactly:
 - ${techCnt} Technical questions
 - ${behCnt} Behavioral questions
@@ -117,15 +304,38 @@ Resume:
 ${resTxt}
 Job Description:
 ${jdTxt}`;
+    } else {
+      // If only resume is available
+      prompt=`Generate interview questions based on the candidate's resume below.
+Return exactly:
+- ${techCnt} Technical questions
+- ${behCnt} Behavioral questions
+- ${sitCnt} Situational questions
+
+Format strictly:
+### Technical Questions
+1. ...
+### Behavioral Questions
+1. ...
+### Situational Questions
+1. ...
+
+Resume:
+${resTxt}`;
+    }
+    
     const raw=await callProxy(prompt);
     renderQuestions(raw);
+    
+    // Start interview timer automatically when questions are generated
+    startInterviewTimer();
   }catch(e){
     console.error(e);
     qc.innerText="Error (see console)";
   }
 };
 
-/* ---------- Render Questions + Mic ---------- */
+/* ---------- Render Questions + Speech Controls ---------- */
 function parseBlocks(raw){
   const lines=raw.split(/\r?\n/).map(l=>l.trim()).filter(Boolean);
   const blocks=[];let cur=null;
@@ -139,6 +349,7 @@ function parseBlocks(raw){
   });
   return blocks;
 }
+
 function renderQuestions(raw){
   const blocks=parseBlocks(raw);
   const C=document.getElementById("questionsContainer");
@@ -153,7 +364,11 @@ function renderQuestions(raw){
       d.innerHTML=`
         <p><strong>Q${idx}:</strong> ${q}</p>
         <textarea id="answer${idx}" placeholder="Type your answer…"></textarea>
-        <button class="mic-btn" onclick="startVoice(${idx})">🎤</button>
+        <div class="speech-controls">
+          <button class="mic-btn start-rec" onclick="startRecording('answer${idx}')">🎤 Start</button>
+          <button class="mic-btn stop-rec" onclick="stopRecording()">⏹️ Stop</button>
+          <span class="timer">00:00</span>
+        </div>
         <p class="feedback" id="fb${idx}"></p>`;
       C.appendChild(d);idx++;
     });
@@ -161,29 +376,44 @@ function renderQuestions(raw){
   window.totalQ=idx-1;
 }
 
-/* ---------- Voice to Text ---------- */
-window.recognition = new (window.SpeechRecognition || window.webkitSpeechRecognition)();
-recognition.continuous = false;
-recognition.lang = "en-US";
-
-function startVoice(idx){
-  const textarea=document.getElementById(`answer${idx}`);
-  recognition.onresult = e => {
-    const transcript = e.results[0][0].transcript;
-    textarea.value += (textarea.value ? " " : "") + transcript;
-  };
-  recognition.start();
-}
-
 /* ---------- Evaluation ---------- */
-document.getElementById("evaluateBtn").onclick=async()=>{
-  const n=window.totalQ||0;if(!n){alert("No questions yet");return;}
+async function evaluateAnswers(){
+  // Make sure we stop any recording before evaluation
+  stopRecording();
+  
+  // Stop interview timer when evaluating
+  stopInterviewTimer();
+  
+  // Reset timer after evaluation
+  resetTimer();
+  
+  // Disable evaluate button during evaluation
+  const evaluateBtn = document.getElementById("evaluateBtn");
+  evaluateBtn.disabled = true;
+  evaluateBtn.textContent = "Evaluating...";
+  
+  const n=window.totalQ||0;
+  if(!n){
+    alert("No questions yet");
+    evaluateBtn.disabled = false;
+    evaluateBtn.textContent = "Evaluate Answers";
+    return;
+  }
+  
   for(let i=1;i<=n;i++){
-    const ta=document.getElementById(`answer${i}`);if(!ta)continue;
-    const ans=ta.value.trim();if(!ans)continue;
+    const ta=document.getElementById(`answer${i}`);
+    if(!ta) continue;
+    
+    const ans=ta.value.trim();
+    if(!ans){
+      document.getElementById(`fb${i}`).innerText="No answer provided";
+      continue;
+    }
+    
     const q=ta.parentElement.querySelector("p").innerText;
     const heur=`Filler:${countFiller(ans)} | AvgLen:${avgSentenceLen(ans)} | Repeats:${repetition(ans).join(",")}`;
     const prompt=`You are an interview grader.\nQuestion: ${q}\nAnswer: ${ans}\nHeuristics: ${heur}\nEvaluate on STAR, Bloom (0–5), CEFR clarity, Domain knowledge. Give concise feedback.`;
+    
     document.getElementById(`fb${i}`).innerText="Evaluating…";
     try{
       const fb=await callProxy(prompt);
@@ -193,7 +423,85 @@ document.getElementById("evaluateBtn").onclick=async()=>{
       document.getElementById(`fb${i}`).innerText="Error (see console)";
     }
   }
-};
+  
+  // Re-enable the evaluate button
+  evaluateBtn.disabled = false;
+  evaluateBtn.textContent = "Evaluate Answers";
+}
+
+document.getElementById("evaluateBtn").onclick = evaluateAnswers;
+
+/* ---------- Interview Timer Functions ---------- */
+function startInterviewTimer() {
+  // Clear any existing timer
+  stopInterviewTimer();
+  
+  const timeLimitMinutes = parseInt(document.getElementById("interviewTimeLimit").value, 10) || 10;
+  interviewTimeRemaining = timeLimitMinutes * 60; // Convert to seconds
+  
+  // Update UI state
+  document.getElementById("generateBtn").disabled = true;
+  document.getElementById("interviewTimeLimit").disabled = true;
+  document.getElementById("stopInterviewBtn").disabled = false;
+  document.getElementById("interviewTimerDisplay").classList.remove("blink");
+  
+  interviewOngoing = true;
+  updateInterviewTimer();
+  
+  // Start the countdown
+  interviewTimerInterval = setInterval(() => {
+    interviewTimeRemaining--;
+    updateInterviewTimer();
+    
+    if (interviewTimeRemaining <= 0) {
+      endInterview();
+    }
+    
+    // Start blinking when less than 1 minute left
+    if (interviewTimeRemaining <= 60) {
+      document.getElementById("interviewTimerDisplay").classList.add("blink");
+    }
+  }, 1000);
+}
+
+function updateInterviewTimer() {
+  const minutes = Math.floor(interviewTimeRemaining / 60);
+  const seconds = interviewTimeRemaining % 60;
+  document.getElementById("interviewTimerDisplay").textContent = 
+    `Time: ${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+}
+
+function resetTimer() {
+  // Reset timer regardless of interview state
+  const timeLimitMinutes = parseInt(document.getElementById("interviewTimeLimit").value, 10) || 10;
+  interviewTimeRemaining = timeLimitMinutes * 60;
+  updateInterviewTimer();
+  document.getElementById("interviewTimerDisplay").classList.remove("blink");
+}
+
+function stopInterviewTimer() {
+  clearInterval(interviewTimerInterval);
+  interviewOngoing = false;
+  stopRecording(); // Stop any active recording
+  
+  // Update UI
+  document.getElementById("generateBtn").disabled = false;
+  document.getElementById("interviewTimeLimit").disabled = false;
+  document.getElementById("stopInterviewBtn").disabled = true;
+}
+
+function endInterview() {
+  stopInterviewTimer();
+  document.getElementById("interviewTimerDisplay").textContent = "Time's up!";
+  
+  // Automatically evaluate answers
+  evaluateAnswers();
+}
+
+// Set up the button handlers
+document.getElementById("resetTimerBtn").addEventListener("click", resetTimer);
+document.getElementById("stopInterviewBtn").addEventListener("click", stopInterviewTimer);
+document.getElementById("evaluateBtn").addEventListener("click", evaluateAnswers);
 </script>
 </body>
 </html>
